@@ -22,7 +22,7 @@ public class FoxController : MonoBehaviour
     {
         float moveHorizontal = Input.GetAxis("Horizontal");
         Vector2 movement = new Vector2(moveHorizontal, 0);
-        rb.velocity = new Vector2(movement.x * moveSpeed, rb.velocity.y);
+        rb.linearVelocity = new Vector2(movement.x * moveSpeed, rb.linearVelocity.y);
     }
 
     private void Jump()
