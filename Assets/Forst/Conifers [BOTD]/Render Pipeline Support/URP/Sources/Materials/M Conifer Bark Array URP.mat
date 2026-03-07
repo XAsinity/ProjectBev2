@@ -27,7 +27,7 @@ Material:
     serializedVersion: 3
     m_TexEnvs:
     - _BaseMapArray:
-        m_Texture: {fileID: 18700000, guid: 41ebf0d05b0ec4283bcbbbc656c82aec, type: 2}
+        m_Texture: {fileID: 18700000, guid: a8b04c39c923d1b49a38133e8260a1cb, type: 2}
         m_Scale: {x: 1, y: 1}
         m_Offset: {x: 0, y: 0}
     - _BumpOcclusionMapArray:
@@ -51,7 +51,7 @@ Material:
     - _BumpScale: 2
     - _QueueControl: 0
     - _QueueOffset: 0
-    - _Smoothness: 1
+    - _Smoothness: 0
     m_Colors:
     - _BaseWindMultipliers: {r: 0.5, g: 2, b: 1, a: 0}
     - _HueVariation: {r: 0, g: 0.9, b: 0.8255172, a: 0.1}
