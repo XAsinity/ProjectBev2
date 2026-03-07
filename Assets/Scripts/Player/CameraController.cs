@@ -7,43 +7,37 @@ public class CameraController : MonoBehaviour
     public float maxLookAngle = 90f;
 
     [Header("Head Bob")]
-    public float bobHeightMin = 0.02f; // Bob height when walking
-    public float bobHeightMax = 0.08f; // Bob height when sprinting
-    public float bobSpeedMultiplier = 0.5f; // How much speed affects bob frequency
+    public float bobHeightMin = 0.02f;
+    public float bobHeightMax = 0.08f;
+    public float bobSpeedMultiplier = 0.5f;
     [Range(0f, 1f)]
-    public float bobIntensity = 1f; // Motion sickness control (0 = disabled, 1 = full)
+    public float bobIntensity = 1f;
 
     private float xRotation = 0f;
     private InputAction lookAction;
+    private InputAction escapeAction;
     private Vector3 originalCameraPos;
     private float bobTimer = 0f;
     private PlayerController playerController;
+    private CharacterController controller;
 
     void Start()
     {
         var inputMap = InputSystem.actions;
         lookAction = inputMap.FindAction("Look");
+        escapeAction = inputMap.FindAction("UI/Cancel"); // ESC key mapped in Input System
 
-        // Get the camera's original position
         originalCameraPos = transform.localPosition;
-
-        // Get reference to player controller
         playerController = GetComponentInParent<PlayerController>();
+        controller = GetComponentInParent<CharacterController>();
 
-        // Lock cursor to center of screen
         Cursor.lockState = CursorLockMode.Locked;
     }
 
     void Update()
     {
         HandleLook();
-        HandleHeadBob();
-
-        // Unlock cursor with ESC
-        if (Input.GetKeyDown(KeyCode.Escape))
-        {
-            Cursor.lockState = Cursor.lockState == CursorLockMode.Locked ? CursorLockMode.None : CursorLockMode.Locked;
-        }
+        HandleEscape();
     }
 
     void HandleLook()
@@ -60,24 +54,33 @@ public class CameraController : MonoBehaviour
         transform.parent.Rotate(Vector3.up * mouseX);
     }
 
+    void HandleEscape()
+    {
+        // Use Input System for ESC instead of Input.GetKeyDown
+        if (escapeAction.WasPressedThisFrame())
+        {
+            Cursor.lockState = Cursor.lockState == CursorLockMode.Locked ? CursorLockMode.None : CursorLockMode.Locked;
+        }
+    }
+
+    void LateUpdate()
+    {
+        HandleHeadBob();
+    }
+
     void HandleHeadBob()
     {
-        CharacterController controller = GetComponentInParent<CharacterController>();
         float currentSpeed = playerController.GetCurrentSpeed();
         bool isMoving = playerController.IsMoving();
 
-        // Only bob if grounded and moving
-        if (controller.isGrounded && isMoving && bobIntensity > 0f)
+        if (isMoving && controller.isGrounded && bobIntensity > 0f)
         {
-            // Normalize speed (0 to 1, where 1 is max sprint speed of 10.5)
             float maxSpeed = 10.5f;
             float speedRatio = Mathf.Clamp01(currentSpeed / maxSpeed);
 
-            // Bob frequency increases slightly with speed
             float bobFrequency = 4f + (speedRatio * 4f * bobSpeedMultiplier);
             bobTimer += Time.deltaTime * bobFrequency;
 
-            // Bob height increases with speed
             float currentBobHeight = Mathf.Lerp(bobHeightMin, bobHeightMax, speedRatio);
             float bobHeight = Mathf.Sin(bobTimer) * currentBobHeight * bobIntensity;
 
@@ -86,11 +89,10 @@ public class CameraController : MonoBehaviour
 
             transform.localPosition = newPos;
         }
-        else
+        else if (!isMoving || !controller.isGrounded)
         {
-            // Return to original position when not moving
             bobTimer = 0f;
-            transform.localPosition = originalCameraPos;
+            transform.localPosition = Vector3.Lerp(transform.localPosition, originalCameraPos, Time.deltaTime * 5f);
         }
     }
 }
