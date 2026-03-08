@@ -46,17 +46,17 @@ public class PerformanceOptimizer : MonoBehaviour
     public float terrainDetailDensity = 0.5f;
     private float lastTerrainDetailDensity = 0.5f;
 
-    [Header("WIND ZONE CONTROL - CRITICAL FOR PERFORMANCE")]
-    public bool enableWindZone = true;
-    private bool lastEnableWindZone = true;
+    [Header("CTI WIND CONTROL - CRITICAL FOR PERFORMANCE")]
+    public bool enableWind = true;
+    private bool lastEnableWind = true;
 
-    [Range(0f, 500f)]
-    public float windZoneDisableDistance = 150f;
-    private float lastWindZoneDisableDistance = 150f;
+    [Range(0f, 10f)]
+    public float windStrength = 1f;
+    private float lastWindStrength = 1f;
 
-    [Range(0f, 2f)]
-    public float windZoneStrength = 1f;
-    private float lastWindZoneStrength = 1f;
+    [Range(0f, 10f)]
+    public float windTurbulence = 1f;
+    private float lastWindTurbulence = 1f;
 
     [Header("Camera Settings")]
     [Range(50f, 2000f)]
@@ -95,13 +95,12 @@ public class PerformanceOptimizer : MonoBehaviour
     private int enabledRendererCount = 0;
     private int totalRendererCount = 0;
     private Terrain[] terrains;
-    private WindZone windZone;
-    private MonoBehaviour ctiWindScript;
-    private float windZoneOriginalStrength = 0f;
-    private float windZoneOriginalTurbulence = 0f;
     private float objectRenderRadiusSqr;
-    private float windZoneDisableDistanceSqr;
-    private bool windActive = false;
+
+    // CTI Wind shader property IDs
+    private int ctiWindPropertyID;
+    private int ctiTurbulencePropertyID;
+    private Vector4 windVector = Vector4.zero;
 
     void Start()
     {
@@ -125,29 +124,10 @@ public class PerformanceOptimizer : MonoBehaviour
             return;
         }
 
-        // Find WindZone using new API
-        windZone = FindFirstObjectByType<WindZone>();
-        if (windZone != null)
-        {
-            windZoneOriginalStrength = windZone.windMain;
-            windZoneOriginalTurbulence = windZone.windTurbulence;
-            Debug.Log($"[PERF] WindZone found with strength: {windZoneOriginalStrength}");
-
-            // Look for CTI Custom Wind script on the WindZone
-            foreach (MonoBehaviour script in windZone.GetComponents<MonoBehaviour>())
-            {
-                if (script.GetType().Name.Contains("CTI") || script.GetType().Name.Contains("Wind"))
-                {
-                    ctiWindScript = script;
-                    Debug.Log($"[PERF] Found wind script: {script.GetType().Name}");
-                    break;
-                }
-            }
-        }
-        else
-        {
-            Debug.LogWarning("[PERF] No WindZone found in scene!");
-        }
+        // Get CTI wind shader property IDs
+        ctiWindPropertyID = Shader.PropertyToID("_CTI_SRP_Wind");
+        ctiTurbulencePropertyID = Shader.PropertyToID("_CTI_SRP_Turbulence");
+        Debug.Log("[PERF] CTI Wind property IDs registered");
 
         // Get all renderers
         allRenderers = FindObjectsByType<Renderer>(FindObjectsSortMode.None);
@@ -270,15 +250,13 @@ public class PerformanceOptimizer : MonoBehaviour
             lastTerrainDetailDensity = terrainDetailDensity;
         }
 
-        // WindZone control
-        if (windZoneDisableDistance != lastWindZoneDisableDistance ||
-            enableWindZone != lastEnableWindZone ||
-            windZoneStrength != lastWindZoneStrength)
+        // CTI Wind control
+        if (enableWind != lastEnableWind || windStrength != lastWindStrength || windTurbulence != lastWindTurbulence)
         {
-            lastWindZoneDisableDistance = windZoneDisableDistance;
-            lastEnableWindZone = enableWindZone;
-            lastWindZoneStrength = windZoneStrength;
-            UpdateDistances();
+            lastEnableWind = enableWind;
+            lastWindStrength = windStrength;
+            lastWindTurbulence = windTurbulence;
+            UpdateCTIWind();
         }
 
         if (optimizePhysics != lastOptimizePhysics)
@@ -298,11 +276,8 @@ public class PerformanceOptimizer : MonoBehaviour
             UpdateDistances();
         }
 
-        // Update WindZone every frame
-        if (playerTransform != null && windZone != null)
-        {
-            UpdateWindZone();
-        }
+        // Update CTI wind every frame
+        UpdateCTIWind();
 
         if (enableObjectCulling && playerTransform != null && allRenderers != null)
             UpdateObjectCulling();
@@ -311,33 +286,23 @@ public class PerformanceOptimizer : MonoBehaviour
             UpdateDebugUI();
     }
 
-    void UpdateWindZone()
+    void UpdateCTIWind()
     {
-        if (windZone == null || playerTransform == null)
-            return;
-
-        // Determine if wind should be active
-        bool shouldHaveWind = enableWindZone && (windZoneDisableDistance > 0);
-
-        if (shouldHaveWind)
+        if (!enableWind)
         {
-            // Apply wind with strength scale
-            windZone.windMain = windZoneOriginalStrength * windZoneStrength;
-            windZone.windTurbulence = windZoneOriginalTurbulence * windZoneStrength;
-            windActive = true;
+            // Disable all wind
+            Shader.SetGlobalVector(ctiWindPropertyID, Vector4.zero);
+            Shader.SetGlobalFloat(ctiTurbulencePropertyID, 0f);
         }
         else
         {
-            // Disable wind completely - set to 0
-            windZone.windMain = 0f;
-            windZone.windTurbulence = 0f;
-            windActive = false;
-        }
+            // Set wind strength - update global shader properties
+            // The windVector contains direction in XYZ and strength in W
+            windVector = Vector4.zero;
+            windVector.w = windStrength; // Wind strength in W channel
 
-        // Also disable CTI wind script if it exists
-        if (ctiWindScript != null)
-        {
-            ctiWindScript.enabled = shouldHaveWind;
+            Shader.SetGlobalVector(ctiWindPropertyID, windVector);
+            Shader.SetGlobalFloat(ctiTurbulencePropertyID, windTurbulence);
         }
     }
 
@@ -386,7 +351,6 @@ public class PerformanceOptimizer : MonoBehaviour
     void UpdateDistances()
     {
         objectRenderRadiusSqr = objectRenderRadius * objectRenderRadius;
-        windZoneDisableDistanceSqr = windZoneDisableDistance * windZoneDisableDistance;
     }
 
     void UpdateDebugUI()
@@ -399,18 +363,12 @@ public class PerformanceOptimizer : MonoBehaviour
 
         text += $"<b>Current Preset:</b> {qualityPreset}\n\n";
 
-        text += $"<color=orange><b>⚠️ WINDZONE CONTROL (CRITICAL)</b></color>\n";
-        text += $"<b>Enable Wind:</b> {(enableWindZone ? "<color=green>ON" : "<color=red>OFF")}</color>\n";
-        text += $"<b>Wind Active:</b> {(windActive ? "<color=green>YES (TREES MOVE)" : "<color=red>NO (FROZEN)")}</color>\n";
-        text += $"<b>Wind Disable Distance:</b> {windZoneDisableDistance:F0}m\n";
-        text += $"<b>Wind Zone Strength:</b> {windZoneStrength:F2}x\n";
-        text += $"<b>WindZone Found:</b> {(windZone != null ? "<color=green>YES" : "<color=red>NO")}</color>\n";
-        text += $"<b>CTI Wind Script:</b> {(ctiWindScript != null ? "<color=green>FOUND" : "<color=yellow>NOT FOUND")}</color>\n";
-        if (windZone != null)
-        {
-            text += $"<b>Current Wind Main:</b> {windZone.windMain:F3}\n";
-            text += $"<b>Current Turbulence:</b> {windZone.windTurbulence:F3}\n";
-        }
+        text += $"<color=orange><b>⚠️ CTI WIND CONTROL (CRITICAL)</b></color>\n";
+        text += $"<b>Enable Wind:</b> {(enableWind ? "<color=green>ON" : "<color=red>OFF")}</color>\n";
+        text += $"<b>Wind Strength:</b> {windStrength:F2}x\n";
+        text += $"<b>Wind Turbulence:</b> {windTurbulence:F2}x\n";
+        text += $"<b>Global Wind Vector W:</b> {windVector.w:F3}\n";
+        text += $"<b>Global Turbulence:</b> {Shader.GetGlobalFloat(ctiTurbulencePropertyID):F3}\n";
         text += $"\n";
 
         text += $"<color=orange><b>OTHER SETTINGS</b></color>\n";
@@ -424,7 +382,7 @@ public class PerformanceOptimizer : MonoBehaviour
             text += $"<b>Objects Culled:</b> {cullingPercent:F1}%\n";
         }
 
-        text += $"\n<i><color=yellow>Toggle Enable Wind or set\nWind Disable Distance to 0!</color></i>";
+        text += $"\n<i><color=yellow>Toggle Enable Wind to freeze trees!\nSet Strength to 0 for no animation.</color></i>";
 
         debugText.text = text;
     }
@@ -439,9 +397,9 @@ public class PerformanceOptimizer : MonoBehaviour
                 terrainBasemapDistance = 100f;
                 terrainDetailDistance = 25f;
                 terrainDetailDensity = 0.1f;
-                windZoneDisableDistance = 0f;
-                windZoneStrength = 0f;
-                enableWindZone = false;
+                enableWind = false;
+                windStrength = 0f;
+                windTurbulence = 0f;
                 cameraFarClip = 100f;
                 enableMSAA = false;
                 enableShadows = false;
@@ -455,9 +413,9 @@ public class PerformanceOptimizer : MonoBehaviour
                 terrainBasemapDistance = 150f;
                 terrainDetailDistance = 50f;
                 terrainDetailDensity = 0.2f;
-                windZoneDisableDistance = 50f;
-                windZoneStrength = 0.3f;
-                enableWindZone = true;
+                enableWind = true;
+                windStrength = 0.2f;
+                windTurbulence = 0.1f;
                 cameraFarClip = 200f;
                 enableMSAA = false;
                 enableShadows = true;
@@ -471,9 +429,9 @@ public class PerformanceOptimizer : MonoBehaviour
                 terrainBasemapDistance = 250f;
                 terrainDetailDistance = 75f;
                 terrainDetailDensity = 0.35f;
-                windZoneDisableDistance = 100f;
-                windZoneStrength = 0.5f;
-                enableWindZone = true;
+                enableWind = true;
+                windStrength = 0.4f;
+                windTurbulence = 0.2f;
                 cameraFarClip = 300f;
                 enableMSAA = false;
                 enableShadows = true;
@@ -487,9 +445,9 @@ public class PerformanceOptimizer : MonoBehaviour
                 terrainBasemapDistance = 400f;
                 terrainDetailDistance = 100f;
                 terrainDetailDensity = 0.5f;
-                windZoneDisableDistance = 150f;
-                windZoneStrength = 0.75f;
-                enableWindZone = true;
+                enableWind = true;
+                windStrength = 0.6f;
+                windTurbulence = 0.4f;
                 cameraFarClip = 400f;
                 enableMSAA = true;
                 msaaQuality = 2;
@@ -504,9 +462,9 @@ public class PerformanceOptimizer : MonoBehaviour
                 terrainBasemapDistance = 600f;
                 terrainDetailDistance = 150f;
                 terrainDetailDensity = 0.75f;
-                windZoneDisableDistance = 200f;
-                windZoneStrength = 0.9f;
-                enableWindZone = true;
+                enableWind = true;
+                windStrength = 0.8f;
+                windTurbulence = 0.6f;
                 cameraFarClip = 600f;
                 enableMSAA = true;
                 msaaQuality = 4;
@@ -521,9 +479,9 @@ public class PerformanceOptimizer : MonoBehaviour
                 terrainBasemapDistance = 800f;
                 terrainDetailDistance = 200f;
                 terrainDetailDensity = 0.9f;
-                windZoneDisableDistance = 300f;
-                windZoneStrength = 1f;
-                enableWindZone = true;
+                enableWind = true;
+                windStrength = 1f;
+                windTurbulence = 0.8f;
                 cameraFarClip = 1000f;
                 enableMSAA = true;
                 msaaQuality = 8;
@@ -538,9 +496,9 @@ public class PerformanceOptimizer : MonoBehaviour
                 terrainBasemapDistance = 1000f;
                 terrainDetailDistance = 250f;
                 terrainDetailDensity = 1f;
-                windZoneDisableDistance = 500f;
-                windZoneStrength = 1.5f;
-                enableWindZone = true;
+                enableWind = true;
+                windStrength = 1.5f;
+                windTurbulence = 1f;
                 cameraFarClip = 2000f;
                 enableMSAA = true;
                 msaaQuality = 8;
@@ -564,9 +522,6 @@ public class PerformanceOptimizer : MonoBehaviour
         GameObject playerObj = GameObject.FindGameObjectWithTag("Player");
         if (playerObj == null)
             return;
-
-        Gizmos.color = new Color(0, 1, 1, 0.2f);
-        Gizmos.DrawWireSphere(playerObj.transform.position, windZoneDisableDistance);
 
         Gizmos.color = new Color(1, 0.5f, 0, 0.15f);
         Gizmos.DrawWireSphere(playerObj.transform.position, objectRenderRadius);
