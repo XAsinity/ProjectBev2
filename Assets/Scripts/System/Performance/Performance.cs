@@ -42,18 +42,21 @@ public class PerformanceOptimizer : MonoBehaviour
     public float terrainDetailDistance = 100f;
     private float lastTerrainDetailDistance = 100f;
 
-    [Range(0.1f, 1f)]
+    [Range(0.01f, 1f)]
     public float terrainDetailDensity = 0.5f;
     private float lastTerrainDetailDensity = 0.5f;
 
-    [Header("CUSTOM TREE CULLING - RADIUS AROUND PLAYER")]
-    [Range(0f, 500f)]
-    public float treeRenderRadius = 150f;
-    private float lastTreeRenderRadius = 150f;
+    [Header("WIND ZONE CONTROL - CRITICAL FOR PERFORMANCE")]
+    public bool enableWindZone = true;
+    private bool lastEnableWindZone = true;
 
-    [Range(0f, 100f)]
-    public float treeBillboardRadius = 50f;
-    private float lastTreeBillboardRadius = 50f;
+    [Range(0f, 500f)]
+    public float windZoneDisableDistance = 150f;
+    private float lastWindZoneDisableDistance = 150f;
+
+    [Range(0f, 2f)]
+    public float windZoneStrength = 1f;
+    private float lastWindZoneStrength = 1f;
 
     [Header("Camera Settings")]
     [Range(50f, 2000f)]
@@ -92,11 +95,13 @@ public class PerformanceOptimizer : MonoBehaviour
     private int enabledRendererCount = 0;
     private int totalRendererCount = 0;
     private Terrain[] terrains;
-    private float treeRenderRadiusSqr;
-    private float treeBillboardRadiusSqr;
+    private WindZone windZone;
+    private MonoBehaviour ctiWindScript;
+    private float windZoneOriginalStrength = 0f;
+    private float windZoneOriginalTurbulence = 0f;
     private float objectRenderRadiusSqr;
-    private int culledTreeCount = 0;
-    private int totalTreeCount = 0;
+    private float windZoneDisableDistanceSqr;
+    private bool windActive = false;
 
     void Start()
     {
@@ -120,6 +125,30 @@ public class PerformanceOptimizer : MonoBehaviour
             return;
         }
 
+        // Find WindZone using new API
+        windZone = FindFirstObjectByType<WindZone>();
+        if (windZone != null)
+        {
+            windZoneOriginalStrength = windZone.windMain;
+            windZoneOriginalTurbulence = windZone.windTurbulence;
+            Debug.Log($"[PERF] WindZone found with strength: {windZoneOriginalStrength}");
+
+            // Look for CTI Custom Wind script on the WindZone
+            foreach (MonoBehaviour script in windZone.GetComponents<MonoBehaviour>())
+            {
+                if (script.GetType().Name.Contains("CTI") || script.GetType().Name.Contains("Wind"))
+                {
+                    ctiWindScript = script;
+                    Debug.Log($"[PERF] Found wind script: {script.GetType().Name}");
+                    break;
+                }
+            }
+        }
+        else
+        {
+            Debug.LogWarning("[PERF] No WindZone found in scene!");
+        }
+
         // Get all renderers
         allRenderers = FindObjectsByType<Renderer>(FindObjectsSortMode.None);
         System.Collections.Generic.List<Renderer> validRenderers = new System.Collections.Generic.List<Renderer>();
@@ -137,17 +166,7 @@ public class PerformanceOptimizer : MonoBehaviour
         // Get terrain
         terrains = FindObjectsByType<Terrain>(FindObjectsSortMode.None);
 
-        // Count total trees
-        totalTreeCount = 0;
-        foreach (Terrain terrain in terrains)
-        {
-            if (terrain != null && terrain.terrainData != null)
-            {
-                totalTreeCount += terrain.terrainData.treePrototypes.Length;
-            }
-        }
-
-        Debug.Log($"[PERF] Found {totalRendererCount} renderers, {terrains.Length} terrains, and ~{totalTreeCount} tree prototypes");
+        Debug.Log($"[PERF] Found {totalRendererCount} renderers and {terrains.Length} terrains");
         UpdateDistances();
     }
 
@@ -163,12 +182,12 @@ public class PerformanceOptimizer : MonoBehaviour
         GameObject textGO = new GameObject("DebugText");
         textGO.transform.SetParent(canvasGO.transform, false);
         debugText = textGO.AddComponent<TextMeshProUGUI>();
-        debugText.fontSize = 40;
+        debugText.fontSize = 36;
         debugText.color = Color.white;
 
         RectTransform rect = textGO.GetComponent<RectTransform>();
         rect.anchorMin = Vector2.zero;
-        rect.anchorMax = new Vector2(0.5f, 1);
+        rect.anchorMax = new Vector2(0.6f, 1);
         rect.offsetMin = Vector2.zero;
         rect.offsetMax = Vector2.zero;
 
@@ -251,11 +270,14 @@ public class PerformanceOptimizer : MonoBehaviour
             lastTerrainDetailDensity = terrainDetailDensity;
         }
 
-        // Custom tree culling radius
-        if (treeRenderRadius != lastTreeRenderRadius || treeBillboardRadius != lastTreeBillboardRadius)
+        // WindZone control
+        if (windZoneDisableDistance != lastWindZoneDisableDistance ||
+            enableWindZone != lastEnableWindZone ||
+            windZoneStrength != lastWindZoneStrength)
         {
-            lastTreeRenderRadius = treeRenderRadius;
-            lastTreeBillboardRadius = treeBillboardRadius;
+            lastWindZoneDisableDistance = windZoneDisableDistance;
+            lastEnableWindZone = enableWindZone;
+            lastWindZoneStrength = windZoneStrength;
             UpdateDistances();
         }
 
@@ -276,37 +298,46 @@ public class PerformanceOptimizer : MonoBehaviour
             UpdateDistances();
         }
 
-        // Update culling every frame
-        if (playerTransform != null)
+        // Update WindZone every frame
+        if (playerTransform != null && windZone != null)
         {
-            UpdateTerrainTreeDistance();
-            if (enableObjectCulling && allRenderers != null)
-                UpdateObjectCulling();
+            UpdateWindZone();
         }
+
+        if (enableObjectCulling && playerTransform != null && allRenderers != null)
+            UpdateObjectCulling();
 
         if (showDebugUI && debugText != null)
             UpdateDebugUI();
     }
 
-    void UpdateTerrainTreeDistance()
+    void UpdateWindZone()
     {
-        if (terrains == null || terrains.Length == 0)
+        if (windZone == null || playerTransform == null)
             return;
 
-        Vector3 playerPos = playerTransform.position;
+        // Determine if wind should be active
+        bool shouldHaveWind = enableWindZone && (windZoneDisableDistance > 0);
 
-        // Simply update the terrain's tree distance based on player position
-        // This is the most effective way to cull trees
-        foreach (Terrain terrain in terrains)
+        if (shouldHaveWind)
         {
-            if (terrain == null)
-                continue;
+            // Apply wind with strength scale
+            windZone.windMain = windZoneOriginalStrength * windZoneStrength;
+            windZone.windTurbulence = windZoneOriginalTurbulence * windZoneStrength;
+            windActive = true;
+        }
+        else
+        {
+            // Disable wind completely - set to 0
+            windZone.windMain = 0f;
+            windZone.windTurbulence = 0f;
+            windActive = false;
+        }
 
-            // Set tree distance - controls how far from camera trees render
-            terrain.treeDistance = treeRenderRadius * 2f; // Multiply by 2 for better results
-
-            // Set billboard distance - where trees become 2D
-            terrain.treeBillboardDistance = treeBillboardRadius * 2f;
+        // Also disable CTI wind script if it exists
+        if (ctiWindScript != null)
+        {
+            ctiWindScript.enabled = shouldHaveWind;
         }
     }
 
@@ -354,9 +385,8 @@ public class PerformanceOptimizer : MonoBehaviour
 
     void UpdateDistances()
     {
-        treeRenderRadiusSqr = treeRenderRadius * treeRenderRadius;
-        treeBillboardRadiusSqr = treeBillboardRadius * treeBillboardRadius;
         objectRenderRadiusSqr = objectRenderRadius * objectRenderRadius;
+        windZoneDisableDistanceSqr = windZoneDisableDistance * windZoneDisableDistance;
     }
 
     void UpdateDebugUI()
@@ -369,27 +399,32 @@ public class PerformanceOptimizer : MonoBehaviour
 
         text += $"<b>Current Preset:</b> {qualityPreset}\n\n";
 
-        text += $"<color=orange><b>⚠️ TREE RENDERING RADIUS</b></color>\n";
-        text += $"<b>Tree Render Radius:</b> {treeRenderRadius:F0}m\n";
-        text += $"<b>Billboard Radius:</b> {treeBillboardRadius:F0}m\n\n";
+        text += $"<color=orange><b>⚠️ WINDZONE CONTROL (CRITICAL)</b></color>\n";
+        text += $"<b>Enable Wind:</b> {(enableWindZone ? "<color=green>ON" : "<color=red>OFF")}</color>\n";
+        text += $"<b>Wind Active:</b> {(windActive ? "<color=green>YES (TREES MOVE)" : "<color=red>NO (FROZEN)")}</color>\n";
+        text += $"<b>Wind Disable Distance:</b> {windZoneDisableDistance:F0}m\n";
+        text += $"<b>Wind Zone Strength:</b> {windZoneStrength:F2}x\n";
+        text += $"<b>WindZone Found:</b> {(windZone != null ? "<color=green>YES" : "<color=red>NO")}</color>\n";
+        text += $"<b>CTI Wind Script:</b> {(ctiWindScript != null ? "<color=green>FOUND" : "<color=yellow>NOT FOUND")}</color>\n";
+        if (windZone != null)
+        {
+            text += $"<b>Current Wind Main:</b> {windZone.windMain:F3}\n";
+            text += $"<b>Current Turbulence:</b> {windZone.windTurbulence:F3}\n";
+        }
+        text += $"\n";
 
-        text += $"<color=orange><b>⚠️ QUALITY SETTINGS</b></color>\n";
+        text += $"<color=orange><b>OTHER SETTINGS</b></color>\n";
         text += $"<b>LOD Bias:</b> {lodBias:F2}\n";
-        text += $"<b>Terrain Detail Dist:</b> {terrainDetailDistance:F0}m\n";
-        text += $"<b>Terrain Detail Density:</b> {terrainDetailDensity:F2}\n\n";
-
-        text += $"<b>Shadows:</b> {(enableShadows ? "<color=green>ON" : "<color=red>OFF")}</color>\n";
-        text += $"<b>Shadow Distance:</b> {shadowDistance:F0}m\n";
-        text += $"<b>Camera Far Clip:</b> {cameraFarClip:F0}m\n";
-        text += $"<b>MSAA:</b> {(enableMSAA ? $"<color=green>{msaaQuality}x" : "<color=red>OFF")}</color>\n\n";
+        text += $"<b>Terrain Detail Density:</b> {terrainDetailDensity:F2}\n";
+        text += $"<b>Shadows:</b> {(enableShadows ? "<color=green>ON" : "<color=red>OFF")}</color>\n\n";
 
         if (enableObjectCulling)
         {
             float cullingPercent = totalRendererCount > 0 ? ((float)(totalRendererCount - enabledRendererCount) / totalRendererCount * 100f) : 0f;
-            text += $"<b>Objects:</b> {enabledRendererCount}/{totalRendererCount}\n";
+            text += $"<b>Objects Culled:</b> {cullingPercent:F1}%\n";
         }
 
-        text += $"\n<i><color=yellow>Try 75-150m tree radius\nfor best performance!</color></i>";
+        text += $"\n<i><color=yellow>Toggle Enable Wind or set\nWind Disable Distance to 0!</color></i>";
 
         debugText.text = text;
     }
@@ -404,8 +439,9 @@ public class PerformanceOptimizer : MonoBehaviour
                 terrainBasemapDistance = 100f;
                 terrainDetailDistance = 25f;
                 terrainDetailDensity = 0.1f;
-                treeRenderRadius = 25f;
-                treeBillboardRadius = 10f;
+                windZoneDisableDistance = 0f;
+                windZoneStrength = 0f;
+                enableWindZone = false;
                 cameraFarClip = 100f;
                 enableMSAA = false;
                 enableShadows = false;
@@ -419,8 +455,9 @@ public class PerformanceOptimizer : MonoBehaviour
                 terrainBasemapDistance = 150f;
                 terrainDetailDistance = 50f;
                 terrainDetailDensity = 0.2f;
-                treeRenderRadius = 50f;
-                treeBillboardRadius = 25f;
+                windZoneDisableDistance = 50f;
+                windZoneStrength = 0.3f;
+                enableWindZone = true;
                 cameraFarClip = 200f;
                 enableMSAA = false;
                 enableShadows = true;
@@ -434,8 +471,9 @@ public class PerformanceOptimizer : MonoBehaviour
                 terrainBasemapDistance = 250f;
                 terrainDetailDistance = 75f;
                 terrainDetailDensity = 0.35f;
-                treeRenderRadius = 75f;
-                treeBillboardRadius = 40f;
+                windZoneDisableDistance = 100f;
+                windZoneStrength = 0.5f;
+                enableWindZone = true;
                 cameraFarClip = 300f;
                 enableMSAA = false;
                 enableShadows = true;
@@ -449,8 +487,9 @@ public class PerformanceOptimizer : MonoBehaviour
                 terrainBasemapDistance = 400f;
                 terrainDetailDistance = 100f;
                 terrainDetailDensity = 0.5f;
-                treeRenderRadius = 100f;
-                treeBillboardRadius = 50f;
+                windZoneDisableDistance = 150f;
+                windZoneStrength = 0.75f;
+                enableWindZone = true;
                 cameraFarClip = 400f;
                 enableMSAA = true;
                 msaaQuality = 2;
@@ -465,8 +504,9 @@ public class PerformanceOptimizer : MonoBehaviour
                 terrainBasemapDistance = 600f;
                 terrainDetailDistance = 150f;
                 terrainDetailDensity = 0.75f;
-                treeRenderRadius = 150f;
-                treeBillboardRadius = 75f;
+                windZoneDisableDistance = 200f;
+                windZoneStrength = 0.9f;
+                enableWindZone = true;
                 cameraFarClip = 600f;
                 enableMSAA = true;
                 msaaQuality = 4;
@@ -481,8 +521,9 @@ public class PerformanceOptimizer : MonoBehaviour
                 terrainBasemapDistance = 800f;
                 terrainDetailDistance = 200f;
                 terrainDetailDensity = 0.9f;
-                treeRenderRadius = 250f;
-                treeBillboardRadius = 125f;
+                windZoneDisableDistance = 300f;
+                windZoneStrength = 1f;
+                enableWindZone = true;
                 cameraFarClip = 1000f;
                 enableMSAA = true;
                 msaaQuality = 8;
@@ -497,8 +538,9 @@ public class PerformanceOptimizer : MonoBehaviour
                 terrainBasemapDistance = 1000f;
                 terrainDetailDistance = 250f;
                 terrainDetailDensity = 1f;
-                treeRenderRadius = 400f;
-                treeBillboardRadius = 200f;
+                windZoneDisableDistance = 500f;
+                windZoneStrength = 1.5f;
+                enableWindZone = true;
                 cameraFarClip = 2000f;
                 enableMSAA = true;
                 msaaQuality = 8;
@@ -523,16 +565,10 @@ public class PerformanceOptimizer : MonoBehaviour
         if (playerObj == null)
             return;
 
-        // Draw tree render radius (green)
-        Gizmos.color = new Color(0, 1, 0, 0.3f);
-        Gizmos.DrawWireSphere(playerObj.transform.position, treeRenderRadius);
+        Gizmos.color = new Color(0, 1, 1, 0.2f);
+        Gizmos.DrawWireSphere(playerObj.transform.position, windZoneDisableDistance);
 
-        // Draw billboard radius (yellow)
-        Gizmos.color = new Color(1, 1, 0, 0.3f);
-        Gizmos.DrawWireSphere(playerObj.transform.position, treeBillboardRadius);
-
-        // Draw object culling radius (red)
-        Gizmos.color = new Color(1, 0, 0, 0.2f);
+        Gizmos.color = new Color(1, 0.5f, 0, 0.15f);
         Gizmos.DrawWireSphere(playerObj.transform.position, objectRenderRadius);
     }
 }
