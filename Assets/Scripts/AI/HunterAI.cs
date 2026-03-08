@@ -11,6 +11,14 @@ public class HunterAI : MonoBehaviour
     public AudioClip doeCallSound;
     public float doeCallCutoffTime = 10f;
 
+    [Header("Death Settings")]
+    public AudioSource gunshotAudioSource;
+    public AudioClip gunshotSound;
+    public float gunshotCutoffTime = 1.8f;
+    public CanvasGroup deathScreenCanvasGroup;
+    public float deathScreenFadeDuration = 2f;
+    public float fadeToBlackDelay = 2.4f;
+
     [Header("Luring Behavior (Heard from Far Away)")]
     [Range(0f, 120f)]
     public float minTimeBetweenLures = 60f;
@@ -25,11 +33,11 @@ public class HunterAI : MonoBehaviour
     [Range(5f, 50f)]
     public float huntingDetectionRange = 20f;
 
-    [Range(0.5f, 3f)]
-    public float minTimeBetweenHunts = 1f;
+    [Range(0f, 60f)]
+    public float minTimeBetweenHunts = 15f;
 
-    [Range(1f, 6f)]
-    public float maxTimeBetweenHunts = 3f;
+    [Range(0f, 60f)]
+    public float maxTimeBetweenHunts = 40f;
 
     [Range(0.5f, 1f)]
     public float huntingVolume = 0.8f;
@@ -42,9 +50,8 @@ public class HunterAI : MonoBehaviour
     public Terrain terrain;
     public float spawnHeightAboveTerrain = 20f;
 
-    [Header("Death Settings")]
-    public CanvasGroup deathScreenCanvasGroup;
-    public float deathScreenFadeDuration = 2f;
+    [Header("Performance")]
+    public float terrainSampleInterval = 0.5f;
 
     public bool isActive = true;
     public bool debugMode = true;
@@ -58,11 +65,13 @@ public class HunterAI : MonoBehaviour
     private bool hasPlayedWarningSound = false;
     private bool isHunting = false;
     private Coroutine doeCallCutoffCoroutine;
+    private Coroutine gunshotCutoffCoroutine;
     private bool isSoundPlaying = false;
     private float soundDuration = 0f;
     private float soundPlayTime = 0f;
     private bool playerDead = false;
     private Rigidbody hunterRigidbody;
+    private float terrainSampleTimer = 0f;
 
     void Start()
     {
@@ -91,6 +100,11 @@ public class HunterAI : MonoBehaviour
             Debug.LogError("Hunter: Doe Call Audio Source not assigned!");
         }
 
+        if (gunshotAudioSource == null)
+        {
+            Debug.LogError("Hunter: Gunshot Audio Source not assigned!");
+        }
+
         if (antlerBashSound == null || doeCallSound == null)
         {
             Debug.LogError("Hunter: One or more sounds not assigned!");
@@ -104,14 +118,17 @@ public class HunterAI : MonoBehaviour
         // Setup death screen
         if (deathScreenCanvasGroup == null)
         {
-            deathScreenCanvasGroup = FindAnyObjectByType<CanvasGroup>();
-            if (deathScreenCanvasGroup == null)
+            CanvasGroup[] canvasGroups = FindObjectsByType<CanvasGroup>(FindObjectsSortMode.None);
+            if (canvasGroups.Length > 0)
             {
-                Debug.LogWarning("[HUNTER] Death Screen Canvas Group not found!");
+                deathScreenCanvasGroup = canvasGroups[0];
+                deathScreenCanvasGroup.alpha = 0f;
+                if (debugMode)
+                    Debug.Log("[HUNTER] Death Screen Canvas Group found automatically.");
             }
             else
             {
-                deathScreenCanvasGroup.alpha = 0f;
+                Debug.LogWarning("[HUNTER] Death Screen Canvas Group not found!");
             }
         }
         else
@@ -223,8 +240,13 @@ public class HunterAI : MonoBehaviour
 
         if (isHunting)
         {
-            // Move toward player when hunting
-            MoveTowardPlayer();
+            // Move toward player when hunting (with terrain sample optimization)
+            terrainSampleTimer += Time.deltaTime;
+            if (terrainSampleTimer >= terrainSampleInterval)
+            {
+                MoveTowardPlayer();
+                terrainSampleTimer = 0f;
+            }
 
             // HUNTING MODE - sounds (but NOT during aggressive phase)
             if (!hasPlayedWarningSound)
@@ -306,7 +328,7 @@ public class HunterAI : MonoBehaviour
     {
         isSoundPlaying = true;
         soundPlayTime = Time.time;
-        soundDuration = 0.8f;
+        soundDuration = antlerBashSound.length;
 
         float pitchVariation = Random.Range(0.85f, 1.0f);
         antlerAudioSource.pitch = pitchVariation;
@@ -315,7 +337,7 @@ public class HunterAI : MonoBehaviour
         antlerAudioSource.PlayOneShot(antlerBashSound);
 
         if (debugMode)
-            Debug.Log($"[HUNTER] 🎺 ANTLER LURE - Next lure in: {nextLureTime:F1}s");
+            Debug.Log($"[HUNTER] 🎺 ANTLER LURE (duration: {soundDuration:F2}s) - Next lure in: {nextLureTime:F1}s");
     }
 
     void PlayDoeCall()
@@ -380,7 +402,7 @@ public class HunterAI : MonoBehaviour
         }
         else if (antlerBashSound != null && antlerAudioSource != null)
         {
-            soundDuration = 1.0f;
+            soundDuration = antlerBashSound.length;
 
             float pitchVariation = Random.Range(0.9f, 1.2f);
             antlerAudioSource.pitch = pitchVariation;
@@ -450,13 +472,109 @@ public class HunterAI : MonoBehaviour
 
         Debug.Log("[HUNTER] ☠️ PLAYER KILLED!");
 
-        StartCoroutine(FadeToBlack());
+        // Stop ALL player movement and audio
+        StartCoroutine(PlayDeathAudio());
 
+        // Disable player controls
         PlayerController playerController = playerTransform.GetComponent<PlayerController>();
         if (playerController != null)
         {
             playerController.enabled = false;
         }
+
+        // Stop any animator
+        Animator animator = playerTransform.GetComponent<Animator>();
+        if (animator != null)
+        {
+            animator.enabled = false;
+        }
+
+        // Stop any CharacterController/Rigidbody movement
+        CharacterController charController = playerTransform.GetComponent<CharacterController>();
+        if (charController != null)
+        {
+            charController.enabled = false;
+        }
+
+        Rigidbody playerRb = playerTransform.GetComponent<Rigidbody>();
+        if (playerRb != null)
+        {
+            playerRb.linearVelocity = Vector3.zero;
+            playerRb.isKinematic = true;
+        }
+    }
+
+    IEnumerator PlayDeathAudio()
+    {
+        // Pause ALL audio temporarily
+        AudioListener.pause = true;
+        yield return new WaitForSecondsRealtime(0.05f);
+
+        // Resume audio
+        AudioListener.pause = false;
+
+        // Find and stop ALL audio sources except gunshot
+        AudioSource[] allAudioSources = FindObjectsByType<AudioSource>(FindObjectsSortMode.None);
+        foreach (AudioSource audio in allAudioSources)
+        {
+            if (audio != gunshotAudioSource)
+            {
+                audio.Stop();
+                audio.enabled = false; // Disable to prevent any playback
+                if (debugMode)
+                    Debug.Log($"[HUNTER] Stopped & disabled audio: {audio.gameObject.name}");
+            }
+        }
+
+        // Play gunshot
+        PlayGunshotSound();
+
+        // Start death sequence
+        StartCoroutine(DeathSequence());
+    }
+
+    void PlayGunshotSound()
+    {
+        if (gunshotAudioSource == null || gunshotSound == null)
+        {
+            Debug.LogWarning("[HUNTER] Gunshot audio source or sound not assigned!");
+            return;
+        }
+
+        gunshotAudioSource.enabled = true;
+        gunshotAudioSource.volume = 1f;
+        gunshotAudioSource.PlayOneShot(gunshotSound);
+
+        // Cut off gunshot after specified time
+        if (gunshotCutoffCoroutine != null)
+        {
+            StopCoroutine(gunshotCutoffCoroutine);
+        }
+        gunshotCutoffCoroutine = StartCoroutine(CutoffGunshotSound());
+
+        if (debugMode)
+            Debug.Log($"[HUNTER] 🔫 GUNSHOT! Will cut off in {gunshotCutoffTime}s");
+    }
+
+    IEnumerator CutoffGunshotSound()
+    {
+        yield return new WaitForSeconds(gunshotCutoffTime);
+
+        if (gunshotAudioSource.isPlaying)
+        {
+            gunshotAudioSource.Stop();
+            if (debugMode)
+                Debug.Log("[HUNTER] 🔫 GUNSHOT - CUT SHORT");
+        }
+    }
+
+    IEnumerator DeathSequence()
+    {
+        // Wait for gunshot to finish before fading to black
+        yield return new WaitForSeconds(fadeToBlackDelay);
+
+        // Now fade to black
+        StartCoroutine(FadeToBlack());
     }
 
     IEnumerator FadeToBlack()
