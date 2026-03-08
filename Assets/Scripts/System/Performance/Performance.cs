@@ -46,6 +46,15 @@ public class PerformanceOptimizer : MonoBehaviour
     public float terrainDetailDensity = 0.5f;
     private float lastTerrainDetailDensity = 0.5f;
 
+    [Header("CUSTOM TREE CULLING - RADIUS AROUND PLAYER")]
+    [Range(0f, 500f)]
+    public float treeRenderRadius = 150f;
+    private float lastTreeRenderRadius = 150f;
+
+    [Range(0f, 100f)]
+    public float treeBillboardRadius = 50f;
+    private float lastTreeBillboardRadius = 50f;
+
     [Header("Camera Settings")]
     [Range(50f, 2000f)]
     public float cameraFarClip = 500f;
@@ -63,24 +72,13 @@ public class PerformanceOptimizer : MonoBehaviour
     public bool optimizePhysics = true;
     private bool lastOptimizePhysics = true;
 
-    [Header("Render Bubble Settings")]
-    public bool enableRenderBubble = true;
-    private bool lastEnableRenderBubble = true;
+    [Header("Object Culling")]
+    public bool enableObjectCulling = true;
+    private bool lastEnableObjectCulling = true;
 
     [Range(50f, 1000f)]
-    public float renderDistance = 300f;
-    private float lastRenderDistance = 300f;
-
-    [Range(20f, 500f)]
-    public float aggressiveDetailDistance = 100f;
-    private float lastAggressiveDetailDistance = 100f;
-
-    [Range(0.1f, 2f)]
-    public float bubbleUpdateFrequency = 0.5f;
-
-    [Range(0, 100)]
-    public int batchSize = 50;
-    private int lastBatchSize = 50;
+    public float objectRenderRadius = 300f;
+    private float lastObjectRenderRadius = 300f;
 
     public string[] excludeTags = { "Player", "Hunter", "Important" };
 
@@ -89,59 +87,79 @@ public class PerformanceOptimizer : MonoBehaviour
     public bool showRenderBubbleGizmo = true;
     private TextMeshProUGUI debugText;
 
-    private float updateTimer = 0f;
     private Renderer[] allRenderers;
     private Transform playerTransform;
-    private float renderDistanceSqr;
-    private float aggressiveDetailDistanceSqr;
-    private int rendererIndex = 0;
-    private int activeRendererCount = 0;
+    private int enabledRendererCount = 0;
     private int totalRendererCount = 0;
+    private Terrain[] terrains;
+    private float treeRenderRadiusSqr;
+    private float treeBillboardRadiusSqr;
+    private float objectRenderRadiusSqr;
+    private int culledTreeCount = 0;
+    private int totalTreeCount = 0;
 
     void Start()
     {
         ApplyPreset();
         CreateDebugUI();
-        InitializeRenderBubble();
+        InitializeCulling();
     }
 
-    void InitializeRenderBubble()
+    void InitializeCulling()
     {
-        if (!enableRenderBubble)
-            return;
-
         // Find player
         GameObject playerObj = GameObject.FindGameObjectWithTag("Player");
         if (playerObj != null)
         {
             playerTransform = playerObj.transform;
-            Debug.Log("[PERF] Render Bubble: Player found");
+            Debug.Log("[PERF] Player found");
         }
         else
         {
-            Debug.LogWarning("[PERF] Render Bubble: Player not found! Make sure player has 'Player' tag.");
-            enableRenderBubble = false;
+            Debug.LogWarning("[PERF] Player not found! Make sure player has 'Player' tag.");
             return;
         }
 
-        // Get all renderers in scene
+        // Get all renderers
         allRenderers = FindObjectsByType<Renderer>(FindObjectsSortMode.None);
-        totalRendererCount = allRenderers.Length;
-        Debug.Log($"[PERF] Render Bubble: Found {totalRendererCount} renderers");
+        System.Collections.Generic.List<Renderer> validRenderers = new System.Collections.Generic.List<Renderer>();
 
-        UpdateRenderBubbleDistances();
+        foreach (Renderer r in allRenderers)
+        {
+            if (r.GetComponent<Image>() != null || r.GetComponent<Text>() != null || r.GetComponent<TextMeshProUGUI>() != null)
+                continue;
+            validRenderers.Add(r);
+        }
+
+        allRenderers = validRenderers.ToArray();
+        totalRendererCount = allRenderers.Length;
+
+        // Get terrain
+        terrains = FindObjectsByType<Terrain>(FindObjectsSortMode.None);
+
+        // Count total trees
+        totalTreeCount = 0;
+        foreach (Terrain terrain in terrains)
+        {
+            if (terrain != null && terrain.terrainData != null)
+            {
+                totalTreeCount += terrain.terrainData.treePrototypes.Length;
+            }
+        }
+
+        Debug.Log($"[PERF] Found {totalRendererCount} renderers, {terrains.Length} terrains, and ~{totalTreeCount} tree prototypes");
+        UpdateDistances();
     }
 
     void CreateDebugUI()
     {
-        // Create Canvas
         GameObject canvasGO = new GameObject("DebugUICanvas");
         Canvas canvas = canvasGO.AddComponent<Canvas>();
         canvas.renderMode = RenderMode.ScreenSpaceOverlay;
         canvasGO.AddComponent<GraphicRaycaster>();
-        canvasGO.AddComponent<CanvasScaler>();
+        CanvasScaler scaler = canvasGO.AddComponent<CanvasScaler>();
+        scaler.uiScaleMode = CanvasScaler.ScaleMode.ScaleWithScreenSize;
 
-        // Create Text
         GameObject textGO = new GameObject("DebugText");
         textGO.transform.SetParent(canvasGO.transform, false);
         debugText = textGO.AddComponent<TextMeshProUGUI>();
@@ -159,14 +177,12 @@ public class PerformanceOptimizer : MonoBehaviour
 
     void Update()
     {
-        // Check if preset changed
         if (qualityPreset != lastPreset)
         {
             ApplyPreset();
             lastPreset = qualityPreset;
         }
 
-        // Check for changes and apply
         if (lodBias != lastLodBias)
         {
             QualitySettings.lodBias = lodBias;
@@ -207,26 +223,40 @@ public class PerformanceOptimizer : MonoBehaviour
 
         if (terrainBasemapDistance != lastTerrainBasemapDistance)
         {
-            Terrain[] terrains = FindObjectsByType<Terrain>(FindObjectsSortMode.None);
-            foreach (Terrain terrain in terrains)
-                terrain.basemapDistance = terrainBasemapDistance;
+            if (terrains != null)
+            {
+                foreach (Terrain terrain in terrains)
+                    terrain.basemapDistance = terrainBasemapDistance;
+            }
             lastTerrainBasemapDistance = terrainBasemapDistance;
         }
 
         if (terrainDetailDistance != lastTerrainDetailDistance)
         {
-            Terrain[] terrains = FindObjectsByType<Terrain>(FindObjectsSortMode.None);
-            foreach (Terrain terrain in terrains)
-                terrain.detailObjectDistance = terrainDetailDistance;
+            if (terrains != null)
+            {
+                foreach (Terrain terrain in terrains)
+                    terrain.detailObjectDistance = terrainDetailDistance;
+            }
             lastTerrainDetailDistance = terrainDetailDistance;
         }
 
         if (terrainDetailDensity != lastTerrainDetailDensity)
         {
-            Terrain[] terrains = FindObjectsByType<Terrain>(FindObjectsSortMode.None);
-            foreach (Terrain terrain in terrains)
-                terrain.detailObjectDensity = terrainDetailDensity;
+            if (terrains != null)
+            {
+                foreach (Terrain terrain in terrains)
+                    terrain.detailObjectDensity = terrainDetailDensity;
+            }
             lastTerrainDetailDensity = terrainDetailDensity;
+        }
+
+        // Custom tree culling radius
+        if (treeRenderRadius != lastTreeRenderRadius || treeBillboardRadius != lastTreeBillboardRadius)
+        {
+            lastTreeRenderRadius = treeRenderRadius;
+            lastTreeBillboardRadius = treeBillboardRadius;
+            UpdateDistances();
         }
 
         if (optimizePhysics != lastOptimizePhysics)
@@ -239,125 +269,76 @@ public class PerformanceOptimizer : MonoBehaviour
             lastOptimizePhysics = optimizePhysics;
         }
 
-        // Render Bubble
-        if (enableRenderBubble != lastEnableRenderBubble)
+        if (objectRenderRadius != lastObjectRenderRadius || enableObjectCulling != lastEnableObjectCulling)
         {
-            lastEnableRenderBubble = enableRenderBubble;
-            if (enableRenderBubble && allRenderers == null)
-                InitializeRenderBubble();
+            lastObjectRenderRadius = objectRenderRadius;
+            lastEnableObjectCulling = enableObjectCulling;
+            UpdateDistances();
         }
 
-        if (renderDistance != lastRenderDistance || aggressiveDetailDistance != lastAggressiveDetailDistance || batchSize != lastBatchSize)
+        // Update culling every frame
+        if (playerTransform != null)
         {
-            lastRenderDistance = renderDistance;
-            lastAggressiveDetailDistance = aggressiveDetailDistance;
-            lastBatchSize = batchSize;
-            UpdateRenderBubbleDistances();
+            UpdateTerrainTreeDistance();
+            if (enableObjectCulling && allRenderers != null)
+                UpdateObjectCulling();
         }
 
-        if (enableRenderBubble && playerTransform != null)
-        {
-            updateTimer += Time.deltaTime;
-            if (updateTimer >= bubbleUpdateFrequency)
-            {
-                if (batchSize > 0)
-                    UpdateBubbleBatched();
-                else
-                    UpdateBubble();
-                updateTimer = 0f;
-            }
-        }
-
-        // Update UI
         if (showDebugUI && debugText != null)
             UpdateDebugUI();
     }
 
-    void UpdateBubble()
+    void UpdateTerrainTreeDistance()
     {
-        if (playerTransform == null || allRenderers == null)
+        if (terrains == null || terrains.Length == 0)
             return;
 
         Vector3 playerPos = playerTransform.position;
-        activeRendererCount = 0;
 
-        foreach (Renderer renderer in allRenderers)
+        // Simply update the terrain's tree distance based on player position
+        // This is the most effective way to cull trees
+        foreach (Terrain terrain in terrains)
         {
-            if (renderer == null || ShouldExclude(renderer.gameObject))
+            if (terrain == null)
                 continue;
 
-            float distanceSqr = Vector3.SqrMagnitude(renderer.transform.position - playerPos);
-            bool shouldRender = distanceSqr <= renderDistanceSqr;
+            // Set tree distance - controls how far from camera trees render
+            terrain.treeDistance = treeRenderRadius * 2f; // Multiply by 2 for better results
 
-            if (renderer.enabled != shouldRender)
-            {
-                renderer.enabled = shouldRender;
-            }
-
-            if (shouldRender)
-                activeRendererCount++;
-
-            // Aggressive detail culling for far objects
-            if (distanceSqr > aggressiveDetailDistanceSqr)
-            {
-                LODGroup lodGroup = renderer.GetComponent<LODGroup>();
-                if (lodGroup != null && lodGroup.enabled)
-                    lodGroup.enabled = false;
-            }
-            else
-            {
-                LODGroup lodGroup = renderer.GetComponent<LODGroup>();
-                if (lodGroup != null && !lodGroup.enabled)
-                    lodGroup.enabled = true;
-            }
+            // Set billboard distance - where trees become 2D
+            terrain.treeBillboardDistance = treeBillboardRadius * 2f;
         }
     }
 
-    void UpdateBubbleBatched()
+    void UpdateObjectCulling()
     {
-        if (playerTransform == null || allRenderers == null)
-            return;
-
         Vector3 playerPos = playerTransform.position;
-        int endIndex = Mathf.Min(rendererIndex + batchSize, allRenderers.Length);
+        enabledRendererCount = 0;
+        float radiusSqr = objectRenderRadius * objectRenderRadius;
 
-        for (int i = rendererIndex; i < endIndex; i++)
+        for (int i = 0; i < allRenderers.Length; i++)
         {
-            Renderer renderer = allRenderers[i];
-            if (renderer == null || ShouldExclude(renderer.gameObject))
+            if (allRenderers[i] == null)
                 continue;
 
-            float distanceSqr = Vector3.SqrMagnitude(renderer.transform.position - playerPos);
-            bool shouldRender = distanceSqr <= renderDistanceSqr;
-
-            if (renderer.enabled != shouldRender)
+            if (ShouldExclude(allRenderers[i].gameObject))
             {
-                renderer.enabled = shouldRender;
+                if (!allRenderers[i].enabled)
+                    allRenderers[i].enabled = true;
+                enabledRendererCount++;
+                continue;
+            }
+
+            float distanceSqr = Vector3.SqrMagnitude(allRenderers[i].transform.position - playerPos);
+            bool shouldRender = distanceSqr <= radiusSqr;
+
+            if (allRenderers[i].enabled != shouldRender)
+            {
+                allRenderers[i].enabled = shouldRender;
             }
 
             if (shouldRender)
-                activeRendererCount++;
-
-            // Aggressive detail culling
-            if (distanceSqr > aggressiveDetailDistanceSqr)
-            {
-                LODGroup lodGroup = renderer.GetComponent<LODGroup>();
-                if (lodGroup != null && lodGroup.enabled)
-                    lodGroup.enabled = false;
-            }
-            else
-            {
-                LODGroup lodGroup = renderer.GetComponent<LODGroup>();
-                if (lodGroup != null && !lodGroup.enabled)
-                    lodGroup.enabled = true;
-            }
-        }
-
-        rendererIndex = endIndex;
-        if (rendererIndex >= allRenderers.Length)
-        {
-            rendererIndex = 0;
-            activeRendererCount = 0;
+                enabledRendererCount++;
         }
     }
 
@@ -371,10 +352,11 @@ public class PerformanceOptimizer : MonoBehaviour
         return false;
     }
 
-    void UpdateRenderBubbleDistances()
+    void UpdateDistances()
     {
-        renderDistanceSqr = renderDistance * renderDistance;
-        aggressiveDetailDistanceSqr = aggressiveDetailDistance * aggressiveDetailDistance;
+        treeRenderRadiusSqr = treeRenderRadius * treeRenderRadius;
+        treeBillboardRadiusSqr = treeBillboardRadius * treeBillboardRadius;
+        objectRenderRadiusSqr = objectRenderRadius * objectRenderRadius;
     }
 
     void UpdateDebugUI()
@@ -387,29 +369,27 @@ public class PerformanceOptimizer : MonoBehaviour
 
         text += $"<b>Current Preset:</b> {qualityPreset}\n\n";
 
-        text += $"<b>LOD Bias:</b> {lodBias:F2}\n";
-        text += $"<b>Shadows:</b> {(enableShadows ? "<color=green>ON" : "<color=red>OFF")}</color>\n";
-        text += $"<b>Shadow Distance:</b> {shadowDistance:F0}m\n";
-        text += $"<b>Shadow Res:</b> {QualitySettings.shadowResolution}\n\n";
+        text += $"<color=orange><b>⚠️ TREE RENDERING RADIUS</b></color>\n";
+        text += $"<b>Tree Render Radius:</b> {treeRenderRadius:F0}m\n";
+        text += $"<b>Billboard Radius:</b> {treeBillboardRadius:F0}m\n\n";
 
-        text += $"<b>Terrain Basemap Dist:</b> {terrainBasemapDistance:F0}m\n";
+        text += $"<color=orange><b>⚠️ QUALITY SETTINGS</b></color>\n";
+        text += $"<b>LOD Bias:</b> {lodBias:F2}\n";
         text += $"<b>Terrain Detail Dist:</b> {terrainDetailDistance:F0}m\n";
         text += $"<b>Terrain Detail Density:</b> {terrainDetailDensity:F2}\n\n";
 
+        text += $"<b>Shadows:</b> {(enableShadows ? "<color=green>ON" : "<color=red>OFF")}</color>\n";
+        text += $"<b>Shadow Distance:</b> {shadowDistance:F0}m\n";
         text += $"<b>Camera Far Clip:</b> {cameraFarClip:F0}m\n";
-        text += $"<b>MSAA:</b> {(enableMSAA ? $"<color=green>{msaaQuality}x" : "<color=red>OFF")}</color>\n";
-        text += $"<b>Physics Opt:</b> {(optimizePhysics ? "<color=green>ON" : "<color=red>OFF")}</color>\n\n";
+        text += $"<b>MSAA:</b> {(enableMSAA ? $"<color=green>{msaaQuality}x" : "<color=red>OFF")}</color>\n\n";
 
-        if (enableRenderBubble)
+        if (enableObjectCulling)
         {
-            text += $"<color=cyan><b>RENDER BUBBLE</b></color>\n";
-            text += $"<b>Status:</b> <color=green>ACTIVE</color>\n";
-            text += $"<b>Render Distance:</b> {renderDistance:F0}m\n";
-            text += $"<b>Aggressive Detail:</b> {aggressiveDetailDistance:F0}m\n";
-            text += $"<b>Active Renderers:</b> {activeRendererCount}/{totalRendererCount}\n";
+            float cullingPercent = totalRendererCount > 0 ? ((float)(totalRendererCount - enabledRendererCount) / totalRendererCount * 100f) : 0f;
+            text += $"<b>Objects:</b> {enabledRendererCount}/{totalRendererCount}\n";
         }
 
-        text += $"\n<i><color=gray>Adjust settings in Inspector\nto see changes in real-time</color></i>";
+        text += $"\n<i><color=yellow>Try 75-150m tree radius\nfor best performance!</color></i>";
 
         debugText.text = text;
     }
@@ -424,11 +404,12 @@ public class PerformanceOptimizer : MonoBehaviour
                 terrainBasemapDistance = 100f;
                 terrainDetailDistance = 25f;
                 terrainDetailDensity = 0.1f;
+                treeRenderRadius = 25f;
+                treeBillboardRadius = 10f;
                 cameraFarClip = 100f;
                 enableMSAA = false;
                 enableShadows = false;
-                renderDistance = 150f;
-                aggressiveDetailDistance = 50f;
+                objectRenderRadius = 150f;
                 Debug.Log("[PERF] Applied: ABSOLUTE ZERO");
                 break;
 
@@ -438,11 +419,12 @@ public class PerformanceOptimizer : MonoBehaviour
                 terrainBasemapDistance = 150f;
                 terrainDetailDistance = 50f;
                 terrainDetailDensity = 0.2f;
+                treeRenderRadius = 50f;
+                treeBillboardRadius = 25f;
                 cameraFarClip = 200f;
                 enableMSAA = false;
                 enableShadows = true;
-                renderDistance = 200f;
-                aggressiveDetailDistance = 75f;
+                objectRenderRadius = 200f;
                 Debug.Log("[PERF] Applied: VERY LOW");
                 break;
 
@@ -452,11 +434,12 @@ public class PerformanceOptimizer : MonoBehaviour
                 terrainBasemapDistance = 250f;
                 terrainDetailDistance = 75f;
                 terrainDetailDensity = 0.35f;
+                treeRenderRadius = 75f;
+                treeBillboardRadius = 40f;
                 cameraFarClip = 300f;
                 enableMSAA = false;
                 enableShadows = true;
-                renderDistance = 250f;
-                aggressiveDetailDistance = 100f;
+                objectRenderRadius = 250f;
                 Debug.Log("[PERF] Applied: LOW");
                 break;
 
@@ -466,12 +449,13 @@ public class PerformanceOptimizer : MonoBehaviour
                 terrainBasemapDistance = 400f;
                 terrainDetailDistance = 100f;
                 terrainDetailDensity = 0.5f;
+                treeRenderRadius = 100f;
+                treeBillboardRadius = 50f;
                 cameraFarClip = 400f;
                 enableMSAA = true;
                 msaaQuality = 2;
                 enableShadows = true;
-                renderDistance = 300f;
-                aggressiveDetailDistance = 120f;
+                objectRenderRadius = 300f;
                 Debug.Log("[PERF] Applied: MEDIUM");
                 break;
 
@@ -481,12 +465,13 @@ public class PerformanceOptimizer : MonoBehaviour
                 terrainBasemapDistance = 600f;
                 terrainDetailDistance = 150f;
                 terrainDetailDensity = 0.75f;
+                treeRenderRadius = 150f;
+                treeBillboardRadius = 75f;
                 cameraFarClip = 600f;
                 enableMSAA = true;
                 msaaQuality = 4;
                 enableShadows = true;
-                renderDistance = 400f;
-                aggressiveDetailDistance = 150f;
+                objectRenderRadius = 400f;
                 Debug.Log("[PERF] Applied: HIGH");
                 break;
 
@@ -496,12 +481,13 @@ public class PerformanceOptimizer : MonoBehaviour
                 terrainBasemapDistance = 800f;
                 terrainDetailDistance = 200f;
                 terrainDetailDensity = 0.9f;
+                treeRenderRadius = 250f;
+                treeBillboardRadius = 125f;
                 cameraFarClip = 1000f;
                 enableMSAA = true;
                 msaaQuality = 8;
                 enableShadows = true;
-                renderDistance = 500f;
-                aggressiveDetailDistance = 250f;
+                objectRenderRadius = 500f;
                 Debug.Log("[PERF] Applied: VERY HIGH");
                 break;
 
@@ -511,12 +497,13 @@ public class PerformanceOptimizer : MonoBehaviour
                 terrainBasemapDistance = 1000f;
                 terrainDetailDistance = 250f;
                 terrainDetailDensity = 1f;
+                treeRenderRadius = 400f;
+                treeBillboardRadius = 200f;
                 cameraFarClip = 2000f;
                 enableMSAA = true;
                 msaaQuality = 8;
                 enableShadows = true;
-                renderDistance = 750f;
-                aggressiveDetailDistance = 400f;
+                objectRenderRadius = 750f;
                 Debug.Log("[PERF] Applied: ABSOLUTE BEST");
                 break;
         }
@@ -524,7 +511,7 @@ public class PerformanceOptimizer : MonoBehaviour
 
     void OnValidate()
     {
-        UpdateRenderBubbleDistances();
+        UpdateDistances();
     }
 
     void OnDrawGizmos()
@@ -536,12 +523,16 @@ public class PerformanceOptimizer : MonoBehaviour
         if (playerObj == null)
             return;
 
-        // Draw render bubble (green)
+        // Draw tree render radius (green)
         Gizmos.color = new Color(0, 1, 0, 0.3f);
-        Gizmos.DrawWireSphere(playerObj.transform.position, renderDistance);
+        Gizmos.DrawWireSphere(playerObj.transform.position, treeRenderRadius);
 
-        // Draw aggressive detail distance (yellow)
-        Gizmos.color = new Color(1, 1, 0, 0.2f);
-        Gizmos.DrawWireSphere(playerObj.transform.position, aggressiveDetailDistance);
+        // Draw billboard radius (yellow)
+        Gizmos.color = new Color(1, 1, 0, 0.3f);
+        Gizmos.DrawWireSphere(playerObj.transform.position, treeBillboardRadius);
+
+        // Draw object culling radius (red)
+        Gizmos.color = new Color(1, 0, 0, 0.2f);
+        Gizmos.DrawWireSphere(playerObj.transform.position, objectRenderRadius);
     }
 }
